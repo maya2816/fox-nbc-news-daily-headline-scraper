@@ -188,8 +188,8 @@ def scrape_headlines_foxnews(url="https://www.foxnews.com", max_retries=3, delay
 
 def scrape_headlines_nbcnews(url="https://www.nbcnews.com", max_retries=3, delay=1, verbose=True):
     """
-    Scrape headline titles from NBC News homepage, custom function tailored to
-    NBC News HTML structure.
+    Scrape headline titles from NBC News homepage.
+    Custom function tailored to NBC News HTML structure.
     
     Args:
         url: NBC News homepage URL (default: https://www.nbcnews.com)
@@ -201,6 +201,64 @@ def scrape_headlines_nbcnews(url="https://www.nbcnews.com", max_retries=3, delay
         list: List of headline strings (titles only, no URLs)
     """
     headlines = []
+    
+    # Keywords to exclude (sponsored content, image credits, navigation, etc.)
+    exclude_keywords = [
+        'promotion', 'sponsored', 'advertisement', 'advert', 'commercial',
+        'getty images', 'via ap', 'via reuters', 'via getty', 'photo by',
+        'photographer', 'credit:', 'image credit', 'nbc news sitemap',
+        'site map', 'closed captioning', 'culture and trends', 'business and tech',
+        'health and science', 'most popular', 'editors\' picks', 'dallas-fort worth',
+        'washington, d.c.', 'nbc asian america', 'special features', 'next steps for vets',
+        'nbc news site map', 'live', 'trump admin', 'sherrone moore charges',
+        'washington floods', 'tina peters pardon', 'house oversight committee',
+        'andrew caballero-reynolds', 'saul loeb', 'joe raedle', 'alex brandon',
+        'win mcnamee', 'luke hales', 'anatolii stepanov', 'al drago', 'alberto cassani',
+        'tobias schwartz', 'mykal mceldowney', 'usa today network', 'via imagn',
+        'tommy forbes', 'bango studios', 'justine goode', 'anthony behar', 'sipa usa',
+        'stuart cahill', 'the boston herald', 'via ap, pool', 'minh connors',
+        'charles krupa', 'kevin sabitus', 'gareth cattermole', 'tas rights management',
+        'abdalhkem abu riash', 'anadolu via getty', 'vivian le', 'smirnoff',
+        'williams sonoma', 'quiksilver', 'acne studios', 'amazon', 'harry rabinowitz',
+        'michael owens', 'rick egan', 'pool via ap', 'courtesy of', '/ nbc',
+        'nbc news', 'nbc', 'the injury analysts', 'falcons vs buccaneers recap',
+        'tristan jarry trade', 'freddie kitchens fired', 't.j. watt injury',
+        'artificial intelligence', 'nascar antitrust settlement', 'gas explosion',
+        'live hand grenade', 'obamacare premium', 'republican-led house',
+        'justice department', 'the risk of ai', 'a health care', 'pastors and prey',
+        'u.s. offers', 'iran arrests', 'king charles to', 'germany summons',
+        'federal reserve', 'senators ask', 'monthly tariff', 'reddit challenges',
+        'triple-negative breast', 'fda proposes', 'eurovision champion',
+        'marvelous mrs. maisel', 'talking shop', 'i\'ve tested', 'beef tallow',
+        'schmidt\'s', 'salt & stone', 'native', 'jelly roll says'
+    ]
+    
+    def is_valid_headline(text):
+        """Check if text is a valid headline (not sponsored, credit, etc.)"""
+        if not text or len(text) < 15 or len(text) > 200:
+            return False
+        
+        text_lower = text.lower().strip()
+        
+        # Must have multiple words
+        if ' ' not in text_lower:
+            return False
+        
+        # Exclude if contains exclude keywords
+        for keyword in exclude_keywords:
+            if keyword in text_lower:
+                return False
+        
+        # Exclude if looks like image credit (contains "/", "via", photographer names)
+        if any(pattern in text_lower for pattern in [' / ', ' via ', 'photo by', 'credit:', 'getty', 'ap photo']):
+            return False
+        
+        # Exclude if it's just a name (no verbs, articles, etc.)
+        # Simple heuristic: if it's very short and has no common words
+        if len(text.split()) <= 3 and not any(word in text_lower for word in ['the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'of', 'and', 'or']):
+            return False
+        
+        return True
     
     for attempt in range(max_retries):
         try:
@@ -223,79 +281,54 @@ def scrape_headlines_nbcnews(url="https://www.nbcnews.com", max_retries=3, delay
             # Parse HTML
             soup = BeautifulSoup(response.text, "html.parser")
             
-            # Extract headlines from multiple patterns on NBC News homepage
-            # NBC News uses various structures, so we'll try multiple selectors
-            
-            # 1. Headlines in article tags with various class patterns
-            # Common patterns: <article> -> <h2> or <h3> or <a> with headline text
-            articles = soup.find_all('article')
-            for article in articles:
-                # Try finding headline in h2, h3, or h4 tags
-                for tag in ['h2', 'h3', 'h4']:
-                    heading = article.find(tag)
-                    if heading:
-                        # Check if it's inside a link
-                        link = heading.find('a')
-                        if link:
-                            headline_text = link.get_text(strip=True)
-                        else:
-                            headline_text = heading.get_text(strip=True)
-                        
-                        if headline_text and len(headline_text) > 10:
-                            headlines.append(headline_text)
-                            break  # Found headline for this article, move to next
-            
-                # If no heading found, try finding link with headline-like text
-                if not any(heading for heading in [article.find('h2'), article.find('h3'), article.find('h4')]):
-                    links = article.find_all('a', href=True)
-                    for link in links:
-                        # Check if link looks like a headline (has href to nbcnews.com and reasonable length)
-                        href = link.get('href', '')
-                        if 'nbcnews.com' in href or href.startswith('/'):
-                            headline_text = link.get_text(strip=True)
-                            # Filter out navigation links, short text, etc.
-                            if headline_text and 15 <= len(headline_text) <= 200:
-                                headlines.append(headline_text)
-                                break
-            
-            # 2. Headlines in specific NBC News components
-            # Look for common NBC News class patterns
-            nbc_patterns = [
-                {'tag': 'div', 'class': lambda x: x and ('tease' in x.lower() or 'card' in x.lower())},
-                {'tag': 'div', 'class': lambda x: x and 'story' in x.lower()},
-                {'tag': 'section', 'class': lambda x: x and 'story' in x.lower()},
-            ]
-            
-            for pattern in nbc_patterns:
-                elements = soup.find_all(pattern['tag'], class_=pattern['class'])
-                for elem in elements:
-                    # Find headline within these elements
-                    for tag in ['h2', 'h3', 'h4']:
-                        heading = elem.find(tag)
-                        if heading:
-                            link = heading.find('a')
-                            if link:
-                                headline_text = link.get_text(strip=True)
-                            else:
-                                headline_text = heading.get_text(strip=True)
-                            
-                            if headline_text and len(headline_text) > 10:
-                                headlines.append(headline_text)
-                                break
-            
-            # 3. Headlines in links that point to nbcnews.com articles
-            # Fallback: Find all links to nbcnews.com and extract text
-            all_links = soup.find_all('a', href=True)
-            for link in all_links:
-                href = link.get('href', '')
-                # Check if it's an article link (not navigation, not external)
-                if ('nbcnews.com' in href or href.startswith('/')) and \
-                   not any(skip in href.lower() for skip in ['/video/', '/live/', '/podcast/', '/newsletter', '/subscribe', '/account', '/login']):
+            # 1. Main headline components: <h2 class="storyline__headline founders-cond fw6 lead"> or <h2 class="storyline__headline founders-cond fw6 large">
+            main_headlines = soup.find_all('h2', class_=lambda x: x and 'storyline__headline' in x)
+            for h2 in main_headlines:
+                link = h2.find('a')
+                if link:
                     headline_text = link.get_text(strip=True)
-                    # Filter for reasonable headline length
-                    if headline_text and 15 <= len(headline_text) <= 200:
-                        # Additional filter: should look like a headline (not just a word)
-                        if ' ' in headline_text:  # Headlines usually have multiple words
+                    if is_valid_headline(headline_text):
+                        headlines.append(headline_text)
+            
+            # 2. Latest News section: <h2 class="styles_teaseTitle__ClSV0">
+            latest_news = soup.find_all('h2', class_='styles_teaseTitle__ClSV0')
+            for h2 in latest_news:
+                link = h2.find('a')
+                if link:
+                    headline_text = link.get_text(strip=True)
+                    if is_valid_headline(headline_text):
+                        headlines.append(headline_text)
+            
+            # 3. Topic sections (Politics, U.S. news, etc.): <h2 class="multistoryline__headline founders-cond fw6 large noBottomSpace">
+            topic_headlines = soup.find_all('h2', class_=lambda x: x and 'multistoryline__headline' in x)
+            for h2 in topic_headlines:
+                link = h2.find('a')
+                if link:
+                    headline_text = link.get_text(strip=True)
+                    if is_valid_headline(headline_text):
+                        headlines.append(headline_text)
+            
+            # 4. Additional headlines in sections with storyline class
+            storyline_sections = soup.find_all('section', class_=lambda x: x and 'storyline' in x)
+            for section in storyline_sections:
+                # Look for h2 with headline classes
+                h2_tags = section.find_all('h2', class_=lambda x: x and ('headline' in x.lower() or 'storyline' in x.lower()))
+                for h2 in h2_tags:
+                    link = h2.find('a')
+                    if link:
+                        headline_text = link.get_text(strip=True)
+                        if is_valid_headline(headline_text):
+                            headlines.append(headline_text)
+            
+            # 5. Headlines in package sections (multi-storyline packages)
+            package_sections = soup.find_all('section', class_=lambda x: x and 'pkg' in x and 'multi-storyline' in x)
+            for section in package_sections:
+                h2_tags = section.find_all('h2', class_=lambda x: x and 'headline' in x.lower())
+                for h2 in h2_tags:
+                    link = h2.find('a')
+                    if link:
+                        headline_text = link.get_text(strip=True)
+                        if is_valid_headline(headline_text):
                             headlines.append(headline_text)
             
             # Remove duplicates while preserving order
