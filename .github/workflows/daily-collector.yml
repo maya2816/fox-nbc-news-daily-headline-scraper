@@ -36,7 +36,7 @@ jobs:
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git add data/daily_updated_headlines_data.csv 2>/dev/null || true
+        git add data/daily_updated_headlines_data.csv data/scraping_report.csv 2>/dev/null || true
         git diff --staged --quiet || git commit -m "Daily headline collection - $(date +'%Y-%m-%d')"
         git push || echo "No changes to commit"
       continue-on-error: true

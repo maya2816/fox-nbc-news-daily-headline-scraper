@@ -436,12 +436,91 @@ def collect_daily_headlines(target_date=None):
         return pd.DataFrame(columns=['headline', 'source', 'collection_date'])
 
 
+def update_scraping_report(daily_headlines, existing_df_before, combined_df_after, 
+                           report_path=None):
+    """
+    Update scraping report with statistics from the current scraping session.
+    
+    Args:
+        daily_headlines: DataFrame with newly scraped headlines
+        existing_df_before: DataFrame of existing dataset before adding new headlines (None if first run)
+        combined_df_after: DataFrame after deduplication (final dataset)
+        report_path: Path to report file (default: data/scraping_report.csv)
+    
+    Returns:
+        DataFrame: Updated report
+    """
+    if report_path is None:
+        report_path = os.path.join(DATA_DIR, 'scraping_report.csv')
+    
+    # Calculate statistics
+    collection_date = datetime.now().strftime('%Y-%m-%d')
+    total_scraped = len(daily_headlines)
+    
+    # Count by source
+    fox_count = len(daily_headlines[daily_headlines['source'] == 'FoxNews'])
+    nbc_count = len(daily_headlines[daily_headlines['source'] == 'NBC'])
+    
+    # Calculate how many were added vs duplicates
+    if existing_df_before is not None:
+        # Normalize existing headlines for comparison
+        existing_normalized = set(existing_df_before['headline'].str.lower().str.strip())
+        daily_normalized = set(daily_headlines['headline'].str.lower().str.strip())
+        
+        # Headlines that are new (not in existing dataset)
+        new_headlines = daily_normalized - existing_normalized
+        headlines_added = len(new_headlines)
+        duplicates_found = total_scraped - headlines_added
+        
+        dataset_size_before = len(existing_df_before)
+    else:
+        # First run - all headlines are new
+        headlines_added = total_scraped
+        duplicates_found = 0
+        dataset_size_before = 0
+    
+    dataset_size_after = len(combined_df_after) if combined_df_after is not None else headlines_added
+    
+    # Create report entry
+    report_entry = pd.DataFrame({
+        'scraping_date': [collection_date],
+        'total_headlines_scraped': [total_scraped],
+        'fox_news_count': [fox_count],
+        'nbc_news_count': [nbc_count],
+        'headlines_added': [headlines_added],
+        'duplicates_skipped': [duplicates_found],
+        'dataset_size_before': [dataset_size_before],
+        'dataset_size_after': [dataset_size_after]
+    })
+    
+    # Load existing report or create new
+    if os.path.exists(report_path):
+        try:
+            existing_report = pd.read_csv(report_path)
+            # Append new entry
+            updated_report = pd.concat([existing_report, report_entry], ignore_index=True)
+        except Exception as e:
+            print(f"  Warning: Could not load existing report: {str(e)}")
+            updated_report = report_entry
+    else:
+        updated_report = report_entry
+    
+    # Save updated report
+    updated_report.to_csv(report_path, index=False)
+    print(f"\n[7] Scraping report updated: {report_path}")
+    print(f"    Date: {collection_date}")
+    print(f"    Scraped: {total_scraped} (Fox: {fox_count}, NBC: {nbc_count})")
+    print(f"    Added: {headlines_added}, Duplicates: {duplicates_found}")
+    
+    return updated_report
+
+
 def integrate_with_existing_dataset(daily_headlines,
                                     original_dataset_path=None, 
                                     integrated_dataset_path=None):
     """
     Integrate collected headlines with existing dataset.
-    - Loads original dataset (data/scraped_headlines_data.csv) - this file remains unchanged
+    - Loads original dataset (data/scraped_headlines_data.csv)  remains unchanged
     - Loads integrated dataset (data/daily_updated_headlines_data.csv) if it exists
     - Combines original + existing integrated + new daily headlines
     - Removes duplicates based on headline text (case-insensitive)
@@ -471,6 +550,7 @@ def integrate_with_existing_dataset(daily_headlines,
     print("=" * 60)
     
     all_datasets = []
+    existing_combined_df = None  # For tracking what existed before adding new headlines
     
     # 1. Load original dataset (data/scraped_headlines_data.csv) - this remains unchanged
     if os.path.exists(original_dataset_path):
@@ -521,6 +601,14 @@ def integrate_with_existing_dataset(daily_headlines,
         print(f"[2] Integrated dataset not found: {integrated_dataset_path}")
         print(f"    Will be created with original + new daily headlines")
     
+    # Create combined existing dataset (before adding new headlines) for report tracking
+    if all_datasets:
+        existing_combined_df = pd.concat(all_datasets, ignore_index=True)
+        # Remove duplicates to get the actual existing dataset size
+        existing_combined_df['headline_normalized'] = existing_combined_df['headline'].str.lower().str.strip()
+        existing_combined_df = existing_combined_df.drop_duplicates(subset=['headline_normalized'], keep='first')
+        existing_combined_df = existing_combined_df.drop(columns=['headline_normalized'])
+    
     # 3. Add new daily headlines
     print(f"\n[3] Adding {len(daily_headlines)} new daily headlines")
     if len(daily_headlines) > 0:
@@ -533,53 +621,61 @@ def integrate_with_existing_dataset(daily_headlines,
     
     # 4. Combine all datasets
     if all_datasets:
-        combined_df = pd.concat(all_datasets, ignore_index=True)
-        print(f"\n[4] Combined dataset before deduplication: {len(combined_df)} headlines")
+        combined_df_before = pd.concat(all_datasets, ignore_index=True)
+        print(f"\n[4] Combined dataset before deduplication: {len(combined_df_before)} headlines")
         
         # 5. Remove duplicates based on headline text (case-insensitive)
         # Normalize headlines for comparison
-        combined_df['headline_normalized'] = combined_df['headline'].str.lower().str.strip()
+        combined_df_before['headline_normalized'] = combined_df_before['headline'].str.lower().str.strip()
         
         # Keep first occurrence of each unique headline
-        combined_df = combined_df.drop_duplicates(subset=['headline_normalized'], keep='first')
+        combined_df_after = combined_df_before.drop_duplicates(subset=['headline_normalized'], keep='first')
         
         # Remove the normalization column
-        combined_df = combined_df.drop(columns=['headline_normalized'])
+        combined_df_after = combined_df_after.drop(columns=['headline_normalized'])
         
-        print(f"[5] After removing duplicates: {len(combined_df)} unique headlines")
+        print(f"[5] After removing duplicates: {len(combined_df_after)} unique headlines")
         
         # 6. Save updated integrated dataset
-        combined_df.to_csv(integrated_dataset_path, index=False)
+        combined_df_after.to_csv(integrated_dataset_path, index=False)
         print(f"\n[6] Updated dataset saved to: {integrated_dataset_path}")
         print(f"    Note: {original_dataset_path} remains unchanged (original dataset preserved)")
         
-        # 7. Display summary statistics
+        # 7. Update scraping report
+        # Use existing_combined_df (original + previous integrated, before adding new headlines) for comparison
+        update_scraping_report(daily_headlines, existing_combined_df, combined_df_after)
+        
+        # 8. Display summary statistics
         print(f"\n" + "=" * 60)
         print("Final Dataset Statistics")
         print("=" * 60)
-        print(f"   Total unique headlines: {len(combined_df)}")
+        print(f"   Total unique headlines: {len(combined_df_after)}")
         
         # Source distribution
-        if 'source' in combined_df.columns:
-            source_dist = combined_df['source'].value_counts()
+        if 'source' in combined_df_after.columns:
+            source_dist = combined_df_after['source'].value_counts()
             print(f"\n   By Source:")
             for source, count in source_dist.items():
-                percentage = (count / len(combined_df)) * 100
+                percentage = (count / len(combined_df_after)) * 100
                 print(f"      {source}: {count} ({percentage:.1f}%)")
         
         # Collection date distribution
-        if 'collection_date' in combined_df.columns:
-            date_dist = combined_df['collection_date'].value_counts().head(10)
+        if 'collection_date' in combined_df_after.columns:
+            date_dist = combined_df_after['collection_date'].value_counts().head(10)
             print(f"\n   Top Collection Dates:")
             for date, count in date_dist.items():
                 print(f"      {date}: {count} headlines")
         
-        return combined_df
+        return combined_df_after
     else:
         # No existing datasets, just save the new one
         daily_headlines.to_csv(integrated_dataset_path, index=False)
         print(f"\nCreated new integrated dataset with {len(daily_headlines)} headlines")
         print(f"Saved to: {integrated_dataset_path}")
+        
+        # Update scraping report (all headlines are new in this case - first run)
+        update_scraping_report(daily_headlines, None, daily_headlines)
+        
         return daily_headlines
 
 
