@@ -1,2 +1,3 @@
 scraping_date,total_headlines_scraped,fox_news_count,nbc_news_count,headlines_added,duplicates_skipped,dataset_size_before,dataset_size_after
 2025-12-12,209,178,31,7,202,3993,4000
+2025-12-13,72,36,36,21,51,4000,4021
