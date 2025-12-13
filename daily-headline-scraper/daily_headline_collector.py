@@ -22,6 +22,7 @@ Author: Maya Kfir (CIS 4190 Final Project)
 import os
 import sys
 import time
+import random
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
@@ -184,6 +185,276 @@ def scrape_headlines_foxnews(url="https://www.foxnews.com", max_retries=3, delay
                 return headlines
     
     return headlines
+
+
+def scrape_headlines_nbcnews_latest(url="https://www.nbcnews.com/latest-stories/", max_retries=3, delay=1, verbose=True, use_selenium=True, max_load_more_clicks=5):
+    """
+    Scrape headline titles from NBC News Latest Stories page.
+    This page has a cleaner, more organized structure with better headline coverage.
+    Uses Selenium to click "LOAD MORE" button to retrieve additional headlines.
+    
+    Args:
+        url: NBC News Latest Stories URL (default: https://www.nbcnews.com/latest-stories/)
+        max_retries: Maximum number of retry attempts (default: 3)
+        delay: Delay between retries in seconds (default: 1)
+        verbose: Print scraped headlines (default: True)
+        use_selenium: Whether to use Selenium to click "LOAD MORE" button (default: True)
+        max_load_more_clicks: Maximum number of times to click "LOAD MORE" (default: 5)
+    
+    Returns:
+        list: List of headline strings (titles only, no URLs)
+    """
+    headlines = []
+    seen = set()  # Track unique headlines (case-insensitive)
+    
+    # Keywords to exclude (sponsored content, image credits, navigation, etc.)
+    exclude_keywords = [
+        'promotion', 'sponsored', 'advertisement', 'advert', 'commercial',
+        'getty images', 'via ap', 'via reuters', 'via getty', 'photo by',
+        'photographer', 'credit:', 'image credit', 'nbc news sitemap',
+        'site map', 'closed captioning', 'load more'
+    ]
+    
+    def is_valid_headline(text):
+        """Check if text is a valid headline"""
+        if not text or len(text) < 15 or len(text) > 200:
+            return False
+        text_lower = text.lower().strip()
+        if ' ' not in text_lower:
+            return False
+        for keyword in exclude_keywords:
+            if keyword in text_lower:
+                return False
+        return True
+    
+    def extract_headlines_from_html(html_content):
+        """Extract headlines from HTML content"""
+        soup = BeautifulSoup(html_content, "html.parser")
+        extracted = []
+        
+        # Latest Stories page structure: headlines are in h2 tags with various classes
+        headline_selectors = [
+            'h2 a',  # Most common: h2 with link inside
+            'h3 a',  # Some headlines use h3
+            'article h2 a',  # Headlines within article tags
+            'article h3 a',
+            'h2.wide-tease-item__headline a',  # Specific Latest Stories structure
+            'h2.styles_teaseTitle__ClSV0 a'  # Another specific structure
+        ]
+        
+        for selector in headline_selectors:
+            for element in soup.select(selector):
+                headline_text = element.get_text(strip=True)
+                if is_valid_headline(headline_text) and headline_text.lower() not in seen:
+                    extracted.append(headline_text)
+                    seen.add(headline_text.lower())
+        
+        # Also check for specific Latest Stories page structure
+        story_containers = soup.find_all(['li', 'div'], class_=lambda x: x and ('story' in x.lower() or 'item' in x.lower() or 'article' in x.lower()))
+        for container in story_containers:
+            for tag in ['h2', 'h3', 'h4']:
+                heading = container.find(tag)
+                if heading:
+                    link = heading.find('a')
+                    if link:
+                        headline_text = link.get_text(strip=True)
+                        if is_valid_headline(headline_text) and headline_text.lower() not in seen:
+                            extracted.append(headline_text)
+                            seen.add(headline_text.lower())
+        
+        return extracted
+    
+    # Try Selenium first if requested and available
+    if use_selenium:
+        try:
+            from selenium import webdriver
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.chrome.service import Service
+            from selenium.common.exceptions import TimeoutException, NoSuchElementException
+            
+            # Try to use webdriver-manager for automatic ChromeDriver management
+            try:
+                from webdriver_manager.chrome import ChromeDriverManager
+                use_webdriver_manager = True
+            except ImportError:
+                use_webdriver_manager = False
+            
+            print("  Using Selenium to load additional headlines via 'LOAD MORE' button...")
+            
+            # Set up Chrome options for headless mode
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+            
+            driver = None
+            try:
+                if use_webdriver_manager:
+                    service = Service(ChromeDriverManager().install())
+                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                else:
+                    # Fallback: try to find chromedriver in PATH
+                    driver = webdriver.Chrome(options=chrome_options)
+                driver.set_page_load_timeout(30)
+                driver.get(url)
+                
+                # Wait for page to load
+                time.sleep(3)
+                
+                # Extract initial headlines
+                initial_headlines = extract_headlines_from_html(driver.page_source)
+                headlines.extend(initial_headlines)
+                print(f"  Initial load: {len(initial_headlines)} headlines")
+                
+                # Click "LOAD MORE" button multiple times
+                for click_num in range(max_load_more_clicks):
+                    try:
+                        # Try multiple selectors for the "LOAD MORE" button
+                        load_more_selectors = [
+                            "button:contains('Load More')",
+                            "button:contains('LOAD MORE')",
+                            "a:contains('Load More')",
+                            "a:contains('LOAD MORE')",
+                            "[data-testid*='load']",
+                            "[class*='load']",
+                            "[class*='Load']"
+                        ]
+                        
+                        load_more_button = None
+                        for selector in load_more_selectors:
+                            try:
+                                if selector.startswith("button:") or selector.startswith("a:"):
+                                    # XPath for text contains
+                                    text = selector.split("'")[1]
+                                    xpath = f"//button[contains(text(), '{text}')] | //a[contains(text(), '{text}')]"
+                                    load_more_button = driver.find_element(By.XPATH, xpath)
+                                    break
+                                else:
+                                    load_more_button = driver.find_element(By.CSS_SELECTOR, selector)
+                                    break
+                            except NoSuchElementException:
+                                continue
+                        
+                        if load_more_button is None:
+                            # Try finding by visible text
+                            try:
+                                load_more_button = driver.find_element(By.XPATH, "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'load more')]")
+                            except NoSuchElementException:
+                                break
+                        
+                        # Check if button is visible and clickable
+                        if load_more_button.is_displayed() and load_more_button.is_enabled():
+                            # Scroll to button
+                            driver.execute_script("arguments[0].scrollIntoView(true);", load_more_button)
+                            time.sleep(1)
+                            
+                            # Click the button
+                            driver.execute_script("arguments[0].click();", load_more_button)
+                            print(f"  Clicked 'LOAD MORE' button (click {click_num + 1}/{max_load_more_clicks})")
+                            
+                            # Wait for new content to load
+                            time.sleep(3)
+                            
+                            # Extract new headlines
+                            new_headlines = extract_headlines_from_html(driver.page_source)
+                            new_count = len(new_headlines) - len(headlines)
+                            if new_count > 0:
+                                headlines.extend(new_headlines[len(headlines):])
+                                print(f"  Loaded {new_count} additional headlines (total: {len(headlines)})")
+                            else:
+                                print(f"  No new headlines loaded, stopping")
+                                break
+                        else:
+                            print(f"  'LOAD MORE' button not clickable, stopping")
+                            break
+                            
+                    except (NoSuchElementException, TimeoutException) as e:
+                        print(f"  'LOAD MORE' button not found or not clickable after {click_num + 1} clicks")
+                        break
+                    except Exception as e:
+                        print(f"  Error clicking 'LOAD MORE': {str(e)[:50]}")
+                        break
+                
+            finally:
+                if driver:
+                    driver.quit()
+            
+            unique_headlines = list(headlines)
+            print(f"  Successfully scraped {len(unique_headlines)} unique headlines from NBC Latest Stories (with Selenium)")
+            
+            if verbose and unique_headlines:
+                print(f"\n  Sample headlines from NBC Latest Stories (showing first 5):")
+                for i, headline in enumerate(unique_headlines[:5], 1):
+                    print(f"    {i}. {headline[:80]}{'...' if len(headline) > 80 else ''}")
+                if len(unique_headlines) > 5:
+                    print(f"    ... and {len(unique_headlines) - 5} more")
+            
+            return unique_headlines
+            
+        except ImportError:
+            print("  Selenium not available, falling back to requests/BeautifulSoup...")
+            use_selenium = False
+        except Exception as e:
+            print(f"  Selenium error: {str(e)[:100]}, falling back to requests/BeautifulSoup...")
+            use_selenium = False
+    
+    # Fallback to requests/BeautifulSoup if Selenium is not available or failed
+    if not use_selenium:
+        for attempt in range(max_retries):
+            try:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                response = requests.get(url, timeout=15, headers=headers)
+                
+                if response.status_code != 200:
+                    if attempt < max_retries - 1:
+                        print(f"  Warning: Failed to fetch NBC Latest Stories (status {response.status_code}). Retrying...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        print(f"  Error: Failed to fetch NBC Latest Stories after {max_retries} attempts (status {response.status_code})")
+                        return []
+                
+                extracted = extract_headlines_from_html(response.text)
+                headlines.extend(extracted)
+                
+                unique_headlines = list(headlines)
+                print(f"  Successfully scraped {len(unique_headlines)} unique headlines from NBC Latest Stories (without Selenium - limited to initial page)")
+                
+                if verbose and unique_headlines:
+                    print(f"\n  Sample headlines from NBC Latest Stories (showing first 5):")
+                    for i, headline in enumerate(unique_headlines[:5], 1):
+                        print(f"    {i}. {headline[:80]}{'...' if len(headline) > 80 else ''}")
+                    if len(unique_headlines) > 5:
+                        print(f"    ... and {len(unique_headlines) - 5} more")
+                
+                return unique_headlines
+                
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    print(f"  Retry {attempt + 1}/{max_retries} for NBC Latest Stories...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"  Error: Failed to fetch NBC Latest Stories after {max_retries} attempts: {str(e)}")
+                    return []
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"  Retry {attempt + 1}/{max_retries} for NBC Latest Stories...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"  Error: Unexpected error scraping NBC Latest Stories: {str(e)}")
+                    return []
+    
+    return headlines if headlines else []
 
 
 def scrape_headlines_nbcnews(url="https://www.nbcnews.com", max_retries=3, delay=1, verbose=True):
@@ -376,6 +647,8 @@ def scrape_headlines_nbcnews(url="https://www.nbcnews.com", max_retries=3, delay
 def collect_daily_headlines(target_date=None):
     """
     Collect headlines from Fox News and NBC News homepages for today.
+    Implements balanced sampling: scrapes both sources, finds the minimum count,
+    and randomly samples that amount from the larger source to ensure equal class distribution.
     
     Args:
         target_date: Date to use for collection_date (datetime object). If None, uses today.
@@ -392,25 +665,62 @@ def collect_daily_headlines(target_date=None):
     print(f"\nCollection Date: {target_date.strftime('%Y-%m-%d')}")
     print(f"Time: {target_date.strftime('%H:%M:%S')}")
     
-    collected_headlines = []
-    collected_sources = []
-    collection_dates = []
-    
-    # Scrape Fox News
+    # Step 1: Scrape both homepages
     print("\n[1/2] Scraping Fox News homepage...")
     fox_headlines = scrape_headlines_foxnews()
-    for headline in fox_headlines:
-        collected_headlines.append(headline)
-        collected_sources.append('FoxNews')
-        collection_dates.append(target_date.strftime('%Y-%m-%d'))
+    print(f"  Scraped {len(fox_headlines)} headlines from Fox News")
     
     # Small delay between requests
     time.sleep(2)
     
-    # Scrape NBC News
     print("\n[2/2] Scraping NBC News homepage...")
     nbc_headlines = scrape_headlines_nbcnews()
-    for headline in nbc_headlines:
+    print(f"  Scraped {len(nbc_headlines)} headlines from NBC News")
+    
+    # Step 2: Find minimum number of headlines
+    min_headlines = min(len(fox_headlines), len(nbc_headlines))
+    
+    print(f"\n" + "=" * 60)
+    print("Balancing Headlines")
+    print("=" * 60)
+    print(f"  Fox News scraped: {len(fox_headlines)} headlines")
+    print(f"  NBC News scraped: {len(nbc_headlines)} headlines")
+    print(f"  Minimum (min_headlines): {min_headlines} headlines")
+    
+    # Step 3: Randomly sample min_headlines from each source
+    collected_headlines = []
+    collected_sources = []
+    collection_dates = []
+    
+    if min_headlines == 0:
+        print("\n⚠️  Warning: No headlines were scraped from at least one source.")
+        print("  Cannot create balanced dataset.")
+        return pd.DataFrame(columns=['headline', 'source', 'collection_date'])
+    
+    # Sample from Fox News
+    if len(fox_headlines) > min_headlines:
+        fox_sampled = random.sample(fox_headlines, min_headlines)
+        print(f"  Randomly sampled {min_headlines} headlines from Fox News (from {len(fox_headlines)} total)")
+    else:
+        fox_sampled = fox_headlines
+        print(f"  Using all {len(fox_headlines)} headlines from Fox News")
+    
+    # Sample from NBC News
+    if len(nbc_headlines) > min_headlines:
+        nbc_sampled = random.sample(nbc_headlines, min_headlines)
+        print(f"  Randomly sampled {min_headlines} headlines from NBC News (from {len(nbc_headlines)} total)")
+    else:
+        nbc_sampled = nbc_headlines
+        print(f"  Using all {len(nbc_headlines)} headlines from NBC News")
+    
+    # Add Fox News headlines
+    for headline in fox_sampled:
+        collected_headlines.append(headline)
+        collected_sources.append('FoxNews')
+        collection_dates.append(target_date.strftime('%Y-%m-%d'))
+    
+    # Add NBC News headlines
+    for headline in nbc_sampled:
         collected_headlines.append(headline)
         collected_sources.append('NBC')
         collection_dates.append(target_date.strftime('%Y-%m-%d'))
@@ -429,6 +739,7 @@ def collect_daily_headlines(target_date=None):
         print(f"   Total headlines collected: {len(new_df)}")
         print(f"   Fox News: {len(new_df[new_df['source'] == 'FoxNews'])}")
         print(f"   NBC News: {len(new_df[new_df['source'] == 'NBC'])}")
+        print(f"   ✓ Balanced: {len(new_df[new_df['source'] == 'FoxNews'])} == {len(new_df[new_df['source'] == 'NBC'])}")
         
         return new_df
     else:
